@@ -80,6 +80,16 @@ class CloneDetector {
     }
 
     #filterCloneCandidates(file, compareFile) {
+
+        const newInstances = [];
+        file.chunks.forEach(chunk => {
+            // Find matching chunks in compareFile's chunks
+            const matches = compareFile.chunks.filter(compareChunk => this.#chunkMatch(chunk, compareChunk));
+            matches.forEach(match => {
+                const clone = new Clone(file.name, chunk, match); // Assuming Clone constructor takes these parameters
+                newInstances.push(clone);
+            });
+        });
         // TODO
         // For each chunk in file.chunks, find all #chunkMatch() in compareFile.chunks
         // For each matching chunk, create a new Clone.
@@ -98,6 +108,22 @@ class CloneDetector {
     }
      
     #expandCloneCandidates(file) {
+        const expandedInstances = file.instances.reduce((accumulator, clone) => {
+            // Check if the clone can expand with any existing clones in the accumulator
+            const overlappingClone = accumulator.find(existingClone => existingClone.maybeExpandWith(clone));
+    
+            if (overlappingClone) {
+                // If it overlaps, return the accumulator (already modified)
+                return accumulator;
+            } else {
+                // If it doesn't overlap, add it to the accumulator
+                return accumulator.concat(clone);
+            }
+        }, []); // Start with an empty array
+    
+        // Update file.instances with the expanded clones
+        file.instances = expandedInstances;
+    
         // TODO
         // For each Clone in file.instances, try to expand it with every other Clone
         // (using Clone::maybeExpandWith(), which returns true if it could expand)
@@ -116,6 +142,22 @@ class CloneDetector {
     }
     
     #consolidateClones(file) {
+        const uniqueInstances = file.instances.reduce((accumulator, clone) => {
+            // Check if the clone is already in the accumulator
+            const existingClone = accumulator.find(existing => existing.equals(clone));
+    
+            if (existingClone) {
+                // If it exists, add the target to the existing clone
+                existingClone.addTarget(clone);
+                return accumulator; // Return the accumulator without adding the new clone
+            } else {
+                // If it's a new clone, push it into the accumulator
+                return accumulator.concat(clone);
+            }
+        }, []); // Start with an empty array
+    
+        // Update file.instances with unique clones
+        file.instances = uniqueInstances;
         // TODO
         // For each clone, accumulate it into an array if it is new
         // If it isn't new, update the existing clone to include this one too
@@ -132,6 +174,30 @@ class CloneDetector {
         return file;
     }
     
+        // Helper method to merge redundant clones based on endLine
+    #mergeRedundantClones(file) {
+        const mergedInstances = [];
+        
+        // Iterate through the instances to find and merge
+        file.instances.forEach(clone => {
+            // Check if this clone can be merged with the previous one
+            const lastClone = mergedInstances[mergedInstances.length - 1];
+            
+            if (lastClone && lastClone.endLine === clone.startLine - 1) {
+                // If they are consecutive, merge them
+                lastClone.addTarget(clone); // Assuming addTarget handles merging
+            } else {
+                // Otherwise, add the clone to the merged list
+                mergedInstances.push(clone);
+            }
+        });
+
+        // Update the file's instances with merged clones
+        file.instances = mergedInstances;
+
+        return file;
+    }
+
 
     // Public Processing Steps
     // --------------------
@@ -173,11 +239,13 @@ class CloneDetector {
             file = this.#filterCloneCandidates(file, f); 
             file = this.#expandCloneCandidates(file);
             file = this.#consolidateClones(file); 
+            file = this.#mergeRedundantClones(file);
         }
 
         return file;
     }
 
+        
     pruneFile(file) {
         delete file.lines;
         delete file.instances;

@@ -2,12 +2,33 @@ const express = require('express');
 const formidable = require('formidable');
 const fs = require('fs/promises');
 const app = express();
-const PORT = 3000;
+const port = 3000;
+//const port = process.env.PORT || 3001;
+const path = require('path');
+
+app.set('view engine', 'ejs');
+
+app.set('views', path.join(__dirname, 'views'));
 
 const Timer = require('./Timer');
 const CloneDetector = require('./CloneDetector');
 const CloneStorage = require('./CloneStorage');
 const FileStorage = require('./FileStorage');
+
+
+// Assuming you have a variable to store processing times
+let processingTimes = []; // Store processing times for files
+
+// Route for detailed timing statistics
+app.get('/timing-stats', (req, res) => {
+    res.render('timingStats', { processingTimes });
+});
+
+// Other existing routes...
+
+app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
+});
 
 
 // Express and Formidable stuff to receice a file for further processing
@@ -25,7 +46,7 @@ function fileReceiver(req, res, next) {
 
 app.get('/', viewClones );
 
-const server = app.listen(PORT, () => { console.log('Listening for files on port', PORT); });
+// const server = app.listen(port, () => { console.log('Listening for files on port', port); });
 
 
 // Page generation for viewing current progress
@@ -90,6 +111,22 @@ function viewClones(req, res, next) {
     page += '</BODY></HTML>';
     res.send(page);
 }
+
+
+function processFile(file) {
+    const timer = new Timer();
+    timer.start();
+
+    // Your existing processing logic here...
+
+    // After processing, store the elapsed time and number of lines
+    const elapsedTime = timer.stop();
+    const lineCount = file.lines.length; // Assuming file.lines contains the lines
+    const normalizedTime = elapsedTime / lineCount; // Normalize by number of lines
+
+    processingTimes.push({ fileName: file.name, elapsedTime, lineCount, normalizedTime });
+}
+
 
 // Some helper functions
 // --------------------
