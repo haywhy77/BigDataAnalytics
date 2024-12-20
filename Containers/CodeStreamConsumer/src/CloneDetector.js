@@ -8,31 +8,29 @@ const SourceLine = require('./SourceLine');
 const FileStorage = require('./FileStorage');
 const Clone = require('./Clone');
 
-const DEFAULT_CHUNKSIZE=5;
+const DEFAULT_CHUNKSIZE = 5;
 
 class CloneDetector {
     #myChunkSize = process.env.CHUNKSIZE || DEFAULT_CHUNKSIZE;
     #myFileStore = FileStorage.getInstance();
 
-    constructor() {
-    }
+    constructor() {}
 
     // Private Methods
-    // --------------------
     #filterLines(file) {
         let lines = file.contents.split('\n');
         let inMultiLineComment = false;
-        file.lines=[];
+        file.lines = [];
 
         for (let i = 0; i < lines.length; i++) {
             let line = lines[i];
 
-            if ( inMultiLineComment ) {
-                if ( -1 != line.search(closeMultiLineComment) ) {
+            if (inMultiLineComment) {
+                if (line.search(closeMultiLineComment) !== -1) {
                     line = line.replace(closeMultiLineComment, '');
                     inMultiLineComment = false;
                 } else {
-                    line = '';
+                    line = ''; // Skip this line if inside a multi-line comment
                 }
             }
 
@@ -40,173 +38,87 @@ class CloneDetector {
             line = line.replace(oneLineComment, '');
             line = line.replace(oneLineMultiLineComment, '');
             
-            if ( -1 != line.search(openMultiLineComment) ) {
+            if (line.search(openMultiLineComment) !== -1) {
                 line = line.replace(openMultiLineComment, '');
                 inMultiLineComment = true;
             }
 
-            file.lines.push( new SourceLine(i+1, line.trim()) );
+            file.lines.push(new SourceLine(i + 1, line.trim()));
         }
-       
+
         return file;
     }
 
     #getContentLines(file) {
-        return file.lines.filter( line => line.hasContent() );        
+        return file.lines.filter(line => line.hasContent());
     }
-
 
     #chunkify(file) {
         let chunkSize = this.#myChunkSize;
         let lines = this.#getContentLines(file);
-        file.chunks=[];
+        file.chunks = [];
 
-        for (let i = 0; i <= lines.length-chunkSize; i++) {
-            let chunk = lines.slice(i, i+chunkSize);
+        for (let i = 0; i <= lines.length - chunkSize; i++) {
+            let chunk = lines.slice(i, i + chunkSize);
             file.chunks.push(chunk);
         }
         return file;
     }
-    
+
     #chunkMatch(first, second) {
-        let match = true;
-
-        if (first.length != second.length) { match = false; }
-        for (let idx=0; idx < first.length; idx++) {
-            if (!first[idx].equals(second[idx])) { match = false; }
-        }
-
-        return match;
+        if (first.length !== second.length) return false;
+        return first.every((line, idx) => line.equals(second[idx]));
     }
 
     #filterCloneCandidates(file, compareFile) {
+        file.instances = file.instances || [];
+       
+        let newInstances = file.chunks.flatMap((chunk) => {
+            let matchingChunks = compareFile.chunks.filter(compareChunk =>
+                this.#chunkMatch(chunk, compareChunk)
+            );
 
-        const newInstances = [];
-        file.chunks.forEach(chunk => {
-            // Find matching chunks in compareFile's chunks
-            const matches = compareFile.chunks.filter(compareChunk => this.#chunkMatch(chunk, compareChunk));
-            matches.forEach(match => {
-                const clone = new Clone(file.name, chunk, match); // Assuming Clone constructor takes these parameters
-                newInstances.push(clone);
-            });
+            return matchingChunks.map(match => new Clone(file.name, compareFile.name, chunk, match));
         });
-        // TODO
-        // For each chunk in file.chunks, find all #chunkMatch() in compareFile.chunks
-        // For each matching chunk, create a new Clone.
-        // Store the resulting (flat) array in file.instances.
-        // 
-        // TIP 1: Array.filter to find a set of matches, Array.map to return a new array with modified objects.
-        // TIP 2: You can daisy-chain calls to filter().map().filter().flat() etc.
-        // TIP 3: Remember that file.instances may have already been created, so only append to it.
-        //
-        // Return: file, including file.instances which is an array of Clone objects (or an empty array).
-        //
 
-        file.instances = file.instances || [];        
         file.instances = file.instances.concat(newInstances);
+        console.log(`filterCloneCandidates for ${file.name} with ${compareFile.name}: ${JSON.stringify(file.instances)}`);
         return file;
     }
      
     #expandCloneCandidates(file) {
-        const expandedInstances = file.instances.reduce((accumulator, clone) => {
-            // Check if the clone can expand with any existing clones in the accumulator
-            const overlappingClone = accumulator.find(existingClone => existingClone.maybeExpandWith(clone));
-    
-            if (overlappingClone) {
-                // If it overlaps, return the accumulator (already modified)
-                return accumulator;
-            } else {
-                // If it doesn't overlap, add it to the accumulator
-                return accumulator.concat(clone);
+        file.instances = file.instances.reduce((expanded, current) => {
+            let expandedClone = expanded.find(clone => clone.maybeExpandWith(current));
+            if (!expandedClone) {
+                expanded.push(current); // Add new clone if no overlap
             }
-        }, []); // Start with an empty array
-    
-        // Update file.instances with the expanded clones
-        file.instances = expandedInstances;
-    
-        // TODO
-        // For each Clone in file.instances, try to expand it with every other Clone
-        // (using Clone::maybeExpandWith(), which returns true if it could expand)
-        // 
-        // Comment: This should be doable with a reduce:
-        //          For every new element, check if it overlaps any element in the accumulator.
-        //          If it does, expand the element in the accumulator. If it doesn't, add it to the accumulator.
-        //
-        // ASSUME: As long as you traverse the array file.instances in the "normal" order, only forward expansion is necessary.
-        // 
-        // Return: file, with file.instances only including Clones that have been expanded as much as they can,
-        //         and not any of the Clones used during that expansion.
-        //
-
+            return expanded;
+        }, []);
+        console.log(`expandCloneCandidates: ${JSON.stringify(file.instances)}`);
         return file;
     }
-    
+
     #consolidateClones(file) {
-        const uniqueInstances = file.instances.reduce((accumulator, clone) => {
-            // Check if the clone is already in the accumulator
-            const existingClone = accumulator.find(existing => existing.equals(clone));
-    
+        file.instances = file.instances.reduce((uniqueClones, currentClone) => {
+            let existingClone = uniqueClones.find(clone => clone.equals(currentClone));
             if (existingClone) {
-                // If it exists, add the target to the existing clone
-                existingClone.addTarget(clone);
-                return accumulator; // Return the accumulator without adding the new clone
+                existingClone.addTarget(currentClone);
             } else {
-                // If it's a new clone, push it into the accumulator
-                return accumulator.concat(clone);
+                uniqueClones.push(currentClone);
             }
-        }, []); // Start with an empty array
-    
-        // Update file.instances with unique clones
-        file.instances = uniqueInstances;
-        // TODO
-        // For each clone, accumulate it into an array if it is new
-        // If it isn't new, update the existing clone to include this one too
-        // using Clone::addTarget()
-        // 
-        // TIP 1: Array.reduce() with an empty array as start value.
-        //        Push not-seen-before clones into the accumulator
-        // TIP 2: There should only be one match in the accumulator
-        //        so Array.find() and Clone::equals() will do nicely.
-        //
-        // Return: file, with file.instances containing unique Clone objects that may contain several targets
-        //
-
+            return uniqueClones;
+        }, []);
+        console.log(`consolidateClones: ${JSON.stringify(file.instances)}`);
         return file;
     }
-    
-        // Helper method to merge redundant clones based on endLine
-    #mergeRedundantClones(file) {
-        const mergedInstances = [];
-        
-        // Iterate through the instances to find and merge
-        file.instances.forEach(clone => {
-            // Check if this clone can be merged with the previous one
-            const lastClone = mergedInstances[mergedInstances.length - 1];
-            
-            if (lastClone && lastClone.endLine === clone.startLine - 1) {
-                // If they are consecutive, merge them
-                lastClone.addTarget(clone); // Assuming addTarget handles merging
-            } else {
-                // Otherwise, add the clone to the merged list
-                mergedInstances.push(clone);
-            }
-        });
-
-        // Update the file's instances with merged clones
-        file.instances = mergedInstances;
-
-        return file;
-    }
-
 
     // Public Processing Steps
-    // --------------------
     preprocess(file) {
-        return new Promise( (resolve, reject) => {
-            if (!file.name.endsWith('.java') ) {
-                reject(file.name + ' is not a java file. Discarding.');
-            } else if(this.#myFileStore.isFileProcessed(file.name)) {
-                reject(file.name + ' has already been processed.');
+        return new Promise((resolve, reject) => {
+            if (!file.name.endsWith('.java')) {
+                reject(`${file.name} is not a Java file. Discarding.`);
+            } else if (this.#myFileStore.isFileProcessed(file.name)) {
+                reject(`${file.name} has already been processed.`);
             } else {
                 resolve(file);
             }
@@ -222,29 +134,37 @@ class CloneDetector {
     matchDetect(file) {
         let allFiles = this.#myFileStore.getAllFiles();
         file.instances = file.instances || [];
+   
         for (let f of allFiles) {
-            // TODO implement these methods (or re-write the function matchDetect() to your own liking)
-            // 
-            // Overall process:
-            // 
-            // 1. Find all equal chunks in file and f. Represent each matching pair as a Clone.
-            //
-            // 2. For each Clone with endLine=x, merge it with Clone with endLine-1=x
-            //    remove the now redundant clone, rinse & repeat.
-            //    note that you may end up with several "root" Clones for each processed file f
-            //    if there are more than one clone between the file f and the current
-            //
-            // 3. If the same clone is found in several places, consolidate them into one Clone.
-            //
-            file = this.#filterCloneCandidates(file, f); 
-            file = this.#expandCloneCandidates(file);
-            file = this.#consolidateClones(file); 
-            file = this.#mergeRedundantClones(file);
-        }
+            console.log(`Comparing ${file.name} with ${f.name}`);
 
+            // Step 1: Detect initial matches
+            file = this.#filterCloneCandidates(file, f);
+
+            // Step 2: Expand clones by merging overlaps
+            file = this.#expandCloneCandidates(file);
+
+            // Step 3: Consolidate duplicate clones
+            file = this.#consolidateClones(file);
+
+            // Check if instances are available before attempting to create a new Clone
+            if (file.instances && file.instances.length > 0) {
+                try {
+                    // Create a new Clone with the first instance
+                    let clone = new Clone(file.instances[0]);
+                    // Process the clone (add your logic here)
+                } catch (error) {
+                    console.error('Error creating Clone:', error.message);
+                }
+            } else {
+                console.warn(`No clones found for ${file.name} when comparing with ${f.name}`);
+            }
+        }
+   
+        console.log(`Total clones detected in ${file.name}: ${file.instances.length}`);
+   
         return file;
     }
-
         
     pruneFile(file) {
         delete file.lines;
